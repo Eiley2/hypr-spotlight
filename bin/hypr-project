@@ -1,0 +1,250 @@
+#!/bin/bash
+
+SCREENS=3
+BLOCK=10
+STATE_DIR="$HOME/.cache/hypr-projects"
+PROJECTS_FILE="$STATE_DIR/projects"
+CURRENT_FILE="$STATE_DIR/current"
+
+mkdir -p "$STATE_DIR"
+touch "$PROJECTS_FILE"
+
+get_current() {
+    cat "$CURRENT_FILE" 2>/dev/null
+}
+
+get_start() {
+    local name="$1"
+    while IFS=$'\t' read -r n s; do
+        [ "$n" = "$name" ] && echo "$s" && return
+    done < "$PROJECTS_FILE"
+}
+
+next_start() {
+    local max=0
+    while IFS=$'\t' read -r name start; do
+        [ "$start" -gt "$max" ] && max="$start"
+    done < "$PROJECTS_FILE"
+    if [ "$max" -eq 0 ]; then
+        echo 1
+    else
+        echo $((max + BLOCK))
+    fi
+}
+
+signal_waybar() {
+    pkill -RTMIN+11 waybar 2>/dev/null
+}
+
+# Auto-detect current project from active workspace
+sync_from_workspace() {
+    local active_ws
+    active_ws=$(hyprctl -j activeworkspace 2>/dev/null | jq '.id' 2>/dev/null)
+    [ -z "$active_ws" ] && return
+
+    while IFS=$'\t' read -r name start; do
+        local end=$((start + BLOCK - 1))
+        if [ "$active_ws" -ge "$start" ] && [ "$active_ws" -le "$end" ]; then
+            echo "$name" > "$CURRENT_FILE"
+            return
+        fi
+    done < "$PROJECTS_FILE"
+}
+
+# Auto-create a default project if none exist
+ensure_project() {
+    local current
+    current=$(get_current)
+    if [ -z "$current" ] || [ -z "$(get_start "$current")" ]; then
+        if [ ! -s "$PROJECTS_FILE" ]; then
+            printf '%s\t%s\n' "main" "1" >> "$PROJECTS_FILE"
+            echo "main" > "$CURRENT_FILE"
+        else
+            head -1 "$PROJECTS_FILE" | cut -f1 > "$CURRENT_FILE"
+        fi
+    fi
+}
+
+case "$1" in
+    create)
+        name="${2:-$(walker -d -I -p "  New project:")}"
+        name=$(echo "$name" | xargs)  # trim
+        [ -z "$name" ] && exit 1
+
+        # If exists, just switch to it
+        existing_start=$(get_start "$name")
+        if [ -n "$existing_start" ]; then
+            echo "$name" > "$CURRENT_FILE"
+            hyprctl dispatch workspace "$existing_start" > /dev/null
+            signal_waybar
+            exit 0
+        fi
+
+        start=$(next_start)
+        printf '%s\t%s\n' "$name" "$start" >> "$PROJECTS_FILE"
+        echo "$name" > "$CURRENT_FILE"
+        hyprctl dispatch workspace "$start" > /dev/null
+        signal_waybar
+        ;;
+
+    switch)
+        if [ -n "$2" ]; then
+            name="$2"
+        else
+            name=$(cut -f1 "$PROJECTS_FILE" | walker -d -p "  Switch project:")
+            name=$(echo "$name" | xargs)
+        fi
+        [ -z "$name" ] && exit 1
+
+        start=$(get_start "$name")
+        [ -z "$start" ] && exit 1
+
+        echo "$name" > "$CURRENT_FILE"
+        hyprctl dispatch workspace "$start" > /dev/null
+        signal_waybar
+        ;;
+
+    go)
+        screen="$2"
+        ensure_project
+        current=$(get_current)
+        start=$(get_start "$current")
+        [ -z "$start" ] && exit 1
+        ws=$((start + screen - 1))
+        hyprctl dispatch workspace "$ws" > /dev/null
+        signal_waybar
+        ;;
+
+    move)
+        screen="$2"
+        ensure_project
+        current=$(get_current)
+        start=$(get_start "$current")
+        [ -z "$start" ] && exit 1
+        ws=$((start + screen - 1))
+        hyprctl dispatch movetoworkspacesilent "$ws" > /dev/null
+        signal_waybar
+        ;;
+
+    close)
+        name="${2:-$(get_current)}"
+        [ -z "$name" ] && exit 1
+
+        tmp=$(mktemp)
+        while IFS=$'\t' read -r n s; do
+            [ "$n" != "$name" ] && printf '%s\t%s\n' "$n" "$s"
+        done < "$PROJECTS_FILE" > "$tmp"
+        mv "$tmp" "$PROJECTS_FILE"
+
+        if [ "$(get_current)" = "$name" ]; then
+            first=$(head -1 "$PROJECTS_FILE" | cut -f1)
+            if [ -n "$first" ]; then
+                echo "$first" > "$CURRENT_FILE"
+                hyprctl dispatch workspace "$(get_start "$first")" > /dev/null
+            else
+                > "$CURRENT_FILE"
+            fi
+        fi
+        signal_waybar
+        ;;
+
+    next)
+        current=$(get_current)
+        mapfile -t names < <(cut -f1 "$PROJECTS_FILE")
+        count=${#names[@]}
+        [ "$count" -le 1 ] && exit 0
+
+        for i in "${!names[@]}"; do
+            if [ "${names[$i]}" = "$current" ]; then
+                next_i=$(( (i + 1) % count ))
+                name="${names[$next_i]}"
+                echo "$name" > "$CURRENT_FILE"
+                hyprctl dispatch workspace "$(get_start "$name")" > /dev/null
+                signal_waybar
+                exit 0
+            fi
+        done
+        ;;
+
+    prev)
+        current=$(get_current)
+        mapfile -t names < <(cut -f1 "$PROJECTS_FILE")
+        count=${#names[@]}
+        [ "$count" -le 1 ] && exit 0
+
+        for i in "${!names[@]}"; do
+            if [ "${names[$i]}" = "$current" ]; then
+                prev_i=$(( (i - 1 + count) % count ))
+                name="${names[$prev_i]}"
+                echo "$name" > "$CURRENT_FILE"
+                hyprctl dispatch workspace "$(get_start "$name")" > /dev/null
+                signal_waybar
+                exit 0
+            fi
+        done
+        ;;
+
+    switch-index)
+        index="$2"
+        [ -z "$index" ] && exit 1
+        mapfile -t names < <(cut -f1 "$PROJECTS_FILE")
+        target="${names[$((index - 1))]}"
+        [ -z "$target" ] && exit 0
+        echo "$target" > "$CURRENT_FILE"
+        hyprctl dispatch workspace "$(get_start "$target")" > /dev/null
+        signal_waybar
+        ;;
+
+    list)
+        cut -f1 "$PROJECTS_FILE"
+        ;;
+
+    current)
+        get_current
+        ;;
+
+    waybar)
+        sync_from_workspace
+        current=$(get_current)
+
+        if [ -z "$current" ]; then
+            printf '{"text": "  new", "tooltip": "Click to create a project", "class": "empty"}\n'
+            exit 0
+        fi
+
+        start=$(get_start "$current")
+        active_ws=$(hyprctl -j activeworkspace 2>/dev/null | jq '.id' 2>/dev/null)
+
+        if [ -n "$start" ] && [ -n "$active_ws" ]; then
+            screen=$((active_ws - start + 1))
+        else
+            screen=0
+        fi
+
+        # Build dots: ● active, ◆ has windows, ○ empty
+        occupied=$(hyprctl -j workspaces 2>/dev/null | jq -r \
+            "[.[] | select(.id >= $start and .id < ($start + $BLOCK)) | .id - $start + 1] | .[]" 2>/dev/null)
+
+        dots=""
+        for i in $(seq 1 $SCREENS); do
+            if [ "$i" -eq "$screen" ]; then
+                dots+=" ●"
+            elif echo "$occupied" | grep -qx "$i"; then
+                dots+=" ◆"
+            else
+                dots+=" ○"
+            fi
+        done
+
+        count=$(wc -l < "$PROJECTS_FILE" | xargs)
+        current_esc=$(echo "$current" | sed 's/"/\\"/g')
+
+        printf '{"text": "%s%s", "tooltip": "%s  (%s projects)\\nScreen %d of %d\\n\\nClick: switch | Right-click: new | Middle: close\\nScroll: cycle projects", "class": "active"}\n' \
+            "$current_esc" "$dots" "$current_esc" "$count" "$screen" "$SCREENS"
+        ;;
+
+    *)
+        echo "Usage: hypr-project {create|switch|go|move|close|next|prev|list|current|waybar} [args]"
+        exit 1
+        ;;
+esac

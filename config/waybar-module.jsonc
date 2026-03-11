@@ -1,0 +1,13 @@
+{
+  "custom/project": {
+    "exec": "hypr-project waybar",
+    "return-type": "json",
+    "interval": 1,
+    "signal": 11,
+    "on-click": "hypr-project switch",
+    "on-click-right": "hypr-project create",
+    "on-click-middle": "hypr-project close",
+    "on-scroll-up": "hypr-project next",
+    "on-scroll-down": "hypr-project prev"
+  }
+}

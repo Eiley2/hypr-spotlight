@@ -1,0 +1,10 @@
+/* hypr-project module */
+#custom-project {
+  padding: 0 8px;
+  margin: 0 4px;
+}
+
+#custom-project.empty {
+  opacity: 0.5;
+  font-style: italic;
+}
