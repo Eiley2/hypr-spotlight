@@ -2,7 +2,7 @@
 
 MIN_SCREENS=3
 BLOCK=10
-STATE_DIR="$HOME/.cache/hypr-projects"
+STATE_DIR="$HOME/.cache/hypr-spotlight"
 PROJECTS_FILE="$STATE_DIR/projects"
 CURRENT_FILE="$STATE_DIR/current"
 NAMES_FILE="$STATE_DIR/window-names"
@@ -95,7 +95,7 @@ menu_payload_decode() {
 
 menu_build_json() {
     ensure_apps_cache
-    "$HOME/.local/bin/hypr-project-menu-json"
+    "$HOME/.local/bin/hypr-spotlight-menu-json"
 }
 
 menu_open_value() {
@@ -360,7 +360,7 @@ case "$1" in
         ;;
 
     find)
-        omarchy-launch-walker -m menus:hyprspotlight
+        omarchy-launch-walker -m menus:hypr-spotlight
         ;;
 
     menu-json)
@@ -419,7 +419,7 @@ case "$1" in
         ;;
 
     *)
-        echo "Usage: hypr-project {create|switch|go|move|close|next|prev|name|find|list|current|waybar} [args]"
+        echo "Usage: hypr-spotlight {create|switch|go|move|close|next|prev|name|find|list|current|waybar|menu-json|menu-open} [args]"
         exit 1
         ;;
 esac

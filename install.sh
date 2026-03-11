@@ -2,8 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-MARKER="# >>> hypr-project >>>"
-MARKER_END="# <<< hypr-project <<<"
+MARKER="# >>> hypr-spotlight >>>"
+MARKER_END="# <<< hypr-spotlight <<<"
 
 info()  { echo -e "\033[1;34m::\033[0m $*"; }
 ok()    { echo -e "\033[1;32m::\033[0m $*"; }
@@ -18,24 +18,26 @@ backup() {
     fi
 }
 
-# --- 1. Install script ---
-info "Installing hypr-project to ~/.local/bin/"
+# --- 1. Install scripts ---
+info "Installing hypr-spotlight to ~/.local/bin/"
 mkdir -p ~/.local/bin
-cp "$SCRIPT_DIR/bin/hypr-project" ~/.local/bin/hypr-project
-cp "$SCRIPT_DIR/bin/hypr-project-menu-json" ~/.local/bin/hypr-project-menu-json
-chmod +x ~/.local/bin/hypr-project
-chmod +x ~/.local/bin/hypr-project-menu-json
-ok "Script installed"
+rm -f ~/.local/bin/hypr-project ~/.local/bin/hypr-project-menu-json
+cp "$SCRIPT_DIR/bin/hypr-spotlight" ~/.local/bin/hypr-spotlight
+cp "$SCRIPT_DIR/bin/hypr-spotlight-menu-json" ~/.local/bin/hypr-spotlight-menu-json
+chmod +x ~/.local/bin/hypr-spotlight
+chmod +x ~/.local/bin/hypr-spotlight-menu-json
+ok "Scripts installed"
 
 # --- 2. Install Elephant menu ---
 info "Installing Walker/Elephant spotlight menu"
 mkdir -p ~/.config/elephant/menus
-cp "$SCRIPT_DIR/config/elephant/menus/hyprspotlight.lua" ~/.config/elephant/menus/hyprspotlight.lua
+rm -f ~/.config/elephant/menus/hyprspotlight.lua
+cp "$SCRIPT_DIR/config/elephant/menus/hypr-spotlight.lua" ~/.config/elephant/menus/hypr-spotlight.lua
 ok "Elephant menu installed"
 
 # --- 3. Create state directory ---
-mkdir -p ~/.cache/hypr-projects
-touch ~/.cache/hypr-projects/projects
+mkdir -p ~/.cache/hypr-spotlight
+touch ~/.cache/hypr-spotlight/projects
 
 # --- 4. Patch Hyprland bindings ---
 BINDINGS_FILE="$HOME/.config/hypr/bindings.conf"
@@ -141,7 +143,7 @@ elif command -v killall &>/dev/null; then
 fi
 
 echo ""
-ok "hypr-project installed!"
+ok "hypr-spotlight installed!"
 echo ""
 echo "  Keybindings:"
 echo "    SUPER + 1/2/3         Navigate screens within project"
@@ -150,6 +152,8 @@ echo "    SUPER + ALT + 1-9     Switch to project by index"
 echo "    SUPER + ALT + N       New project"
 echo "    SUPER + ALT + P       Switch project (picker)"
 echo "    SUPER + ALT + W       Close project"
+echo "    SUPER + ALT + R       Name current window"
+echo "    SUPER + ALT + F       Open spotlight"
 echo ""
 echo "  Waybar (click the project indicator):"
 echo "    Click        Switch project"

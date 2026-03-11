@@ -8,11 +8,11 @@ from pathlib import Path
 
 
 HOME = Path.home()
-STATE_DIR = HOME / ".cache" / "hypr-projects"
+STATE_DIR = HOME / ".cache" / "hypr-spotlight"
 PROJECTS_FILE = STATE_DIR / "projects"
 NAMES_FILE = STATE_DIR / "window-names"
 APPS_CACHE = STATE_DIR / "apps-cache.tsv"
-LUA_CACHE = STATE_DIR / "hyprspotlight.lua"
+LUA_CACHE = STATE_DIR / "hypr-spotlight.lua"
 BLOCK = 10
 
 

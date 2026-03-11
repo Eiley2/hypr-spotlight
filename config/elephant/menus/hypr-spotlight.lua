@@ -1,4 +1,4 @@
-Name = "hyprspotlight"
+Name = "hypr-spotlight"
 NamePretty = "Hypr Spotlight"
 Description = "Projects, windows, apps, and actions"
 Icon = "system-search"
@@ -6,10 +6,10 @@ HideFromProviderlist = true
 FixedOrder = true
 History = false
 SearchName = false
-Action = "/home/erik/.local/bin/hypr-project menu-open '%VALUE%'"
+Action = "/home/erik/.local/bin/hypr-spotlight menu-open '%VALUE%'"
 
 function GetEntries()
-    local handle = io.popen("/home/erik/.local/bin/hypr-project-menu-json --lua-file 2>/dev/null")
+    local handle = io.popen("/home/erik/.local/bin/hypr-spotlight-menu-json --lua-file 2>/dev/null")
     if not handle then
         return {}
     end
