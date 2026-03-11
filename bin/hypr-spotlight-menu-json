@@ -10,7 +10,10 @@ from pathlib import Path
 HOME = Path.home()
 STATE_DIR = HOME / ".cache" / "hypr-spotlight"
 PROJECTS_FILE = STATE_DIR / "projects"
+CURRENT_FILE = STATE_DIR / "current"
 NAMES_FILE = STATE_DIR / "window-names"
+ICONS_FILE = STATE_DIR / "project-icons"
+USAGE_FILE = STATE_DIR / "usage.tsv"
 APPS_CACHE = STATE_DIR / "apps-cache.tsv"
 LUA_CACHE = STATE_DIR / "hypr-spotlight.lua"
 BLOCK = 10
@@ -36,6 +39,12 @@ def load_projects():
     return projects
 
 
+def load_current_project():
+    if CURRENT_FILE.exists():
+        return CURRENT_FILE.read_text().strip()
+    return ""
+
+
 def load_custom_names():
     names = {}
     if NAMES_FILE.exists():
@@ -45,6 +54,35 @@ def load_custom_names():
             addr, name = line.split("\t", 1)
             names[addr] = name
     return names
+
+
+def load_project_icons():
+    icons = {}
+    if ICONS_FILE.exists():
+        for line in ICONS_FILE.read_text().splitlines():
+            if not line.strip():
+                continue
+            name, icon = line.split("\t", 1)
+            icons[name] = icon
+    return icons
+
+
+def load_usage():
+    usage = {}
+    if USAGE_FILE.exists():
+        for line in USAGE_FILE.read_text().splitlines():
+            if not line.strip():
+                continue
+            parts = line.split("\t")
+            if len(parts) < 3:
+                continue
+            usage[parts[0]] = (int(parts[1]), int(parts[2]))
+    return usage
+
+
+def project_label(name: str, project_icons):
+    icon = project_icons.get(name, "").strip()
+    return f"{icon} {name}".strip() if icon else name
 
 
 def desktop_keys(desktop_path: str, app_name: str, startup_wmclass: str):
@@ -94,6 +132,28 @@ def load_clients():
     ]
 
 
+def load_active_window_address(clients):
+    try:
+        active = json.loads(subprocess.check_output(["hyprctl", "-j", "activewindow"], text=True))
+    except subprocess.CalledProcessError:
+        active = {}
+
+    active_addr = active.get("address") or ""
+    if active_addr and any(client["address"] == active_addr for client in clients):
+        return active_addr
+
+    try:
+        active_workspace = json.loads(subprocess.check_output(["hyprctl", "-j", "activeworkspace"], text=True))
+    except subprocess.CalledProcessError:
+        active_workspace = {}
+
+    fallback_addr = active_workspace.get("lastwindow") or ""
+    if fallback_addr and any(client["address"] == fallback_addr for client in clients):
+        return fallback_addr
+
+    return ""
+
+
 def locate_project(workspace_id: int, projects):
     for name, start in projects:
         end = start + BLOCK - 1
@@ -110,11 +170,22 @@ def resolve_desktop_for_class(class_name: str, desktop_by_key):
     return ""
 
 
+def usage_sort_key(entry, usage, current_project):
+    count, stamp = usage.get(entry["Value"], (0, 0))
+    current_bonus = 1 if entry.get("_project") and entry["_project"] == current_project else 0
+    type_rank = entry.get("_type_rank", 0)
+    return (-current_bonus, type_rank, -count, -stamp, entry["Text"].lower())
+
+
 def build_entries():
     projects = load_projects()
+    current_project = load_current_project()
     custom_names = load_custom_names()
+    project_icons = load_project_icons()
+    usage = load_usage()
     apps, desktop_by_key, desktop_icon, desktop_name = load_apps()
     clients = load_clients()
+    active_window_address = load_active_window_address(clients)
 
     project_counts = {name: 0 for name, _ in projects}
     for client in clients:
@@ -122,51 +193,155 @@ def build_entries():
         if project_name in project_counts:
             project_counts[project_name] += 1
 
-    entries = []
+    window_entries = []
 
     for client in clients:
         project_name, screen_num = locate_project(client["ws_id"], projects)
+        project_text = project_label(project_name, project_icons)
         desktop = resolve_desktop_for_class(client["class"], desktop_by_key)
         app_display_name = desktop_name.get(desktop) or client["class"]
         title_display = client["title"] or app_display_name
         custom_name = custom_names.get(client["address"], "").strip()
         if custom_name:
-            text = f"{project_name} · {custom_name}"
+            text = f"{project_text} · {custom_name}"
             if title_display and title_display != custom_name:
                 text = f"{text} · {title_display}"
         else:
-            text = f"{project_name} · {title_display}"
+            text = f"{project_text} · {title_display}"
         payload = encode_payload([client["address"], str(client["ws_id"]), project_name])
-        entries.append(
+        window_entries.append(
             {
                 "Text": text,
                 "Subtext": f"{app_display_name} · screen {screen_num}",
                 "Value": f"window:{payload}",
                 "Icon": desktop_icon.get(desktop, "application-x-executable"),
+                "_project": project_name,
+                "_type_rank": 0,
             }
         )
 
+    window_entries.sort(key=lambda entry: usage_sort_key(entry, usage, current_project))
+
+    project_entries = []
     for name, _start in projects:
         payload = base64.b64encode(name.encode()).decode()
-        entries.append(
+        project_entries.append(
             {
-                "Text": name,
+                "Text": project_label(name, project_icons),
                 "Subtext": f'{project_counts.get(name, 0)} windows',
                 "Value": f"project:{payload}",
                 "Icon": "folder",
+                "_project": name,
+                "_type_rank": 0,
             }
         )
+    project_entries.sort(key=lambda entry: usage_sort_key(entry, usage, current_project))
 
-    entries.extend(
+    general_actions = [
         [
             {"Text": "New project", "Subtext": "Create and switch", "Value": "action:create", "Icon": "folder-new"},
             {"Text": "Rename current project", "Subtext": "Rename this workspace group", "Value": "action:name", "Icon": "edit-rename"},
             {"Text": "Rename current window", "Subtext": "Set a custom label for the focused window", "Value": "action:name-window", "Icon": "edit-rename"},
+            {"Text": "Set current project icon", "Subtext": "Set a glyph or short marker for this project", "Value": "action:icon", "Icon": "tag"},
             {"Text": "Focus mode", "Subtext": "Laptop only", "Value": "action:focus-mode", "Icon": "preferences-desktop-display"},
             {"Text": "All screens on", "Subtext": "Enable all monitors", "Value": "action:all-screens", "Icon": "video-display"},
             {"Text": "Screen toggle menu", "Subtext": "Monitor controls", "Value": "action:screen-menu", "Icon": "video-joined-displays"},
         ]
-    )
+    ][0]
+    if current_project and current_project in project_icons:
+        general_actions.insert(
+            3,
+            {
+                "Text": "Clear current project icon",
+                "Subtext": "Remove the marker from this project",
+                "Value": "action:clear-icon",
+                "Icon": "edit-clear",
+            },
+        )
+    for entry in general_actions:
+        entry["_type_rank"] = 1
+
+    current_window_actions = []
+    if active_window_address:
+        current_client = next((client for client in clients if client["address"] == active_window_address), None)
+        if current_client is not None:
+            project_name, screen_num = locate_project(current_client["ws_id"], projects)
+            desktop = resolve_desktop_for_class(current_client["class"], desktop_by_key)
+            app_display_name = desktop_name.get(desktop) or current_client["class"]
+            title_display = current_client["title"] or app_display_name
+            custom_name = custom_names.get(current_client["address"], "").strip()
+            project_text = project_label(project_name, project_icons)
+            window_text = f"{project_text} · {custom_name}" if custom_name else f"{project_text} · {title_display}"
+            if custom_name and title_display and title_display != custom_name:
+                window_text = f"{window_text} · {title_display}"
+
+            def current_action_payload(target_name):
+                return encode_payload(
+                    ["move-project", current_client["address"], str(current_client["ws_id"]), project_name, target_name]
+                )
+
+            for target_name, _ in projects:
+                if target_name == project_name:
+                    continue
+                target_text = project_label(target_name, project_icons)
+                current_window_actions.append(
+                    {
+                        "Text": f"{target_text} · Move current window",
+                        "Subtext": f"{window_text} · keep screen {screen_num}",
+                        "Value": f"window-action:{current_action_payload(target_name)}",
+                        "Icon": "folder-move",
+                        "_project": project_name,
+                        "_type_rank": 1,
+                    }
+                )
+
+    current_window_actions.sort(key=lambda entry: usage_sort_key(entry, usage, current_project))
+
+    window_action_entries = []
+    for client in clients:
+        project_name, screen_num = locate_project(client["ws_id"], projects)
+        project_text = project_label(project_name, project_icons)
+        desktop = resolve_desktop_for_class(client["class"], desktop_by_key)
+        app_display_name = desktop_name.get(desktop) or client["class"]
+        title_display = client["title"] or app_display_name
+        custom_name = custom_names.get(client["address"], "").strip()
+        window_text = f"{project_text} · {custom_name}" if custom_name else f"{project_text} · {title_display}"
+        if custom_name and title_display and title_display != custom_name:
+            window_text = f"{window_text} · {title_display}"
+
+        def action_payload(verb, target=""):
+            return encode_payload([verb, client["address"], str(client["ws_id"]), project_name, target])
+
+        window_action_entries.extend(
+            [
+                {
+                    "Text": f"Close window · {window_text}",
+                    "Subtext": "Window action",
+                    "Value": f"window-action:{action_payload('close')}",
+                    "Icon": desktop_icon.get(desktop, "window-close"),
+                    "_project": project_name,
+                    "_type_rank": 2,
+                },
+                {
+                    "Text": f"Toggle floating · {window_text}",
+                    "Subtext": "Window action",
+                    "Value": f"window-action:{action_payload('float')}",
+                    "Icon": desktop_icon.get(desktop, "preferences-system-windows"),
+                    "_project": project_name,
+                    "_type_rank": 2,
+                },
+                {
+                    "Text": f"Toggle fullscreen · {window_text}",
+                    "Subtext": "Window action",
+                    "Value": f"window-action:{action_payload('fullscreen')}",
+                    "Icon": desktop_icon.get(desktop, "view-fullscreen"),
+                    "_project": project_name,
+                    "_type_rank": 2,
+                },
+            ]
+        )
+
+    window_action_entries.sort(key=lambda entry: usage_sort_key(entry, usage, current_project))
 
     app_entries = []
     for app in apps:
@@ -177,11 +352,16 @@ def build_entries():
                 "Subtext": "Application",
                 "Value": f"app:{payload}",
                 "Icon": app["icon"],
+                "_type_rank": 0,
             }
         )
 
-    app_entries.sort(key=lambda entry: entry["Text"].lower())
-    entries.extend(app_entries)
+    app_entries.sort(key=lambda entry: usage_sort_key(entry, usage, current_project))
+
+    entries = window_entries + project_entries + general_actions + current_window_actions + window_action_entries + app_entries
+    for entry in entries:
+        for key in [key for key in entry if key.startswith("_")]:
+            entry.pop(key, None)
 
     return entries
 

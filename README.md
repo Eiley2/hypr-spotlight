@@ -8,6 +8,9 @@ It lets you:
 - jump between screens inside the current project with number keys
 - switch projects quickly
 - assign custom labels to important windows
+- set small icons for projects
+- run window actions and move windows between projects from spotlight
+- rank windows, projects, and apps by usage over time
 - see the active project in Waybar
 - open a native Walker/Elephant spotlight for windows, apps, projects, and actions
 

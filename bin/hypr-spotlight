@@ -96,6 +96,18 @@ focus_window_target() {
     hyprctl dispatch focuswindow "address:${addr}" > /dev/null 2>&1
 }
 
+window_workspace() {
+    local addr="$1"
+    hyprctl -j clients 2>/dev/null | jq -r --arg addr "$addr" '.[] | select(.address == $addr) | .workspace.id' 2>/dev/null | head -n1
+}
+
+current_project_name() {
+    local active_ws
+    active_ws=$(hyprctl -j activeworkspace 2>/dev/null | jq '.id' 2>/dev/null)
+    [ -z "$active_ws" ] || [ "$active_ws" = "null" ] && return 1
+    project_for_workspace "$active_ws"
+}
+
 project_for_workspace() {
     local workspace_id="$1"
     while IFS=$'\t' read -r name start; do
@@ -258,13 +270,18 @@ menu_open_value() {
                     fi
 
                     target_ws=$((start + screen_num - 1))
-                    hyprctl dispatch movetoworkspacesilent "$target_ws,address:${addr}" > /dev/null 2>&1 || \
+                    hyprctl dispatch movetoworkspacesilent "$target_ws,address:${addr}" > /dev/null 2>&1 || true
+                    moved_ws=$(window_workspace "$addr")
+                    if [ "$moved_ws" != "$target_ws" ]; then
+                        focus_window_target "$addr" "$ws" "$proj"
                         hyprctl dispatch movetoworkspacesilent "$target_ws" > /dev/null 2>&1
+                    fi
                     activate_project "$target"
                     hyprctl dispatch focuswindow "address:${addr}" > /dev/null 2>&1
                     ;;
             esac
             increment_usage "$raw"
+            signal_waybar
             ;;
         action)
             action="$payload"
@@ -287,15 +304,40 @@ menu_open_value() {
 activate_project() {
     local name="$1"
     local start
+    local source_name
+    local source_start
     start=$(get_start "$name")
     [ -z "$start" ] && return 1
 
-    echo "$name" > "$CURRENT_FILE"
-
-    # Get monitor names sorted by ID
-    local monitors
-    mapfile -t monitors < <(hyprctl -j monitors 2>/dev/null | jq -r 'sort_by(.id) | .[].name')
-    local mon_count=${#monitors[@]}
+    # Preserve the current screen-to-monitor mapping when switching projects.
+    local screen_map=()
+    source_name=$(get_current)
+    source_start=$(get_start "$source_name")
+    if [ -n "$source_start" ]; then
+        mapfile -t screen_map < <(
+            hyprctl -j monitors 2>/dev/null | jq -r --argjson start "$source_start" --argjson block "$BLOCK" '
+                sort_by(.id)
+                | .[]
+                | . as $monitor
+                | ($monitor.activeWorkspace.id // 0) as $ws
+                | if $ws >= $start and $ws < ($start + $block)
+                  then "\($monitor.name)\t\($ws - $start + 1)"
+                  else empty
+                  end
+            '
+        )
+    fi
+    if [ "${#screen_map[@]}" -eq 0 ]; then
+        local fallback_monitors
+        mapfile -t fallback_monitors < <(hyprctl -j monitors 2>/dev/null | jq -r 'sort_by(.id) | .[].name')
+        local i=1
+        local mon
+        for mon in "${fallback_monitors[@]}"; do
+            screen_map+=("${mon}"$'\t'"${i}")
+            i=$((i + 1))
+        done
+    fi
+    local mon_count=${#screen_map[@]}
 
     if [ "$mon_count" -le 1 ]; then
         # Single monitor: just switch workspace
@@ -306,10 +348,12 @@ activate_project() {
         local focused
         focused=$(hyprctl -j monitors 2>/dev/null | jq -r '.[] | select(.focused) | .name')
 
-        for i in "${!monitors[@]}"; do
-            local ws=$((start + i))
-            local mon="${monitors[$i]}"
-            [ "$i" -ge "$BLOCK" ] && break
+        local entry
+        for entry in "${screen_map[@]}"; do
+            local mon="${entry%%$'\t'*}"
+            local screen="${entry#*$'\t'}"
+            [ "$screen" -gt "$BLOCK" ] && continue
+            local ws=$((start + screen - 1))
             batch+="dispatch focusmonitor ${mon}; dispatch workspace ${ws}; "
         done
 
@@ -318,6 +362,7 @@ activate_project() {
         hyprctl --batch "$batch" > /dev/null
     fi
 
+    echo "$name" > "$CURRENT_FILE"
     signal_waybar
 }
 
@@ -414,6 +459,7 @@ case "$1" in
             [ "$n" != "$name" ] && printf '%s\t%s\n' "$n" "$s"
         done < "$PROJECTS_FILE" > "$tmp"
         mv "$tmp" "$PROJECTS_FILE"
+        delete_tsv_key "$ICONS_FILE" "$name"
 
         if [ "$(get_current)" = "$name" ]; then
             first=$(head -1 "$PROJECTS_FILE" | cut -f1)
@@ -505,6 +551,12 @@ case "$1" in
             printf '%s\n' "$new_name" > "$CURRENT_FILE"
         fi
 
+        current_icon=$(project_icon "$current_name")
+        if [ -n "$current_icon" ]; then
+            delete_tsv_key "$ICONS_FILE" "$current_name"
+            set_tsv_value "$ICONS_FILE" "$new_name" "$current_icon"
+        fi
+
         signal_waybar
         ;;
 
@@ -528,6 +580,30 @@ case "$1" in
         fi
         printf '%s\t%s\n' "$addr" "$new_name" >> "$tmp"
         mv "$tmp" "$NAMES_FILE"
+        ;;
+
+    icon)
+        current_name="$(current_project_name)"
+        [ -z "$current_name" ] && exit 1
+
+        current_icon=$(project_icon "$current_name")
+        new_icon="${2:-}"
+        if [ -z "$new_icon" ]; then
+            new_icon=$(walker -d -I -p "  Project icon:" 2>/dev/null)
+        fi
+        new_icon=$(echo "$new_icon" | xargs)
+        [ -z "$new_icon" ] && exit 0
+        [ "$new_icon" = "$current_icon" ] && exit 0
+
+        set_tsv_value "$ICONS_FILE" "$current_name" "$new_icon"
+        signal_waybar
+        ;;
+
+    clear-icon)
+        current_name="${2:-$(current_project_name)}"
+        [ -z "$current_name" ] && exit 1
+        delete_tsv_key "$ICONS_FILE" "$current_name"
+        signal_waybar
         ;;
 
     find)
@@ -584,13 +660,18 @@ case "$1" in
 
         count=$(wc -l < "$PROJECTS_FILE" | xargs)
         current_esc=$(echo "$current" | sed 's/"/\\"/g')
+        current_icon=$(project_icon "$current")
+        icon_prefix=""
+        if [ -n "$current_icon" ]; then
+            icon_prefix="${current_icon} "
+        fi
 
         printf '{"text": "%s%s", "tooltip": "%s  (%s projects)\\nScreen %d of %d\\n\\nClick: switch | Right-click: new | Middle: close\\nScroll: cycle projects", "class": "active"}\n' \
-            "$current_esc" "$dots" "$current_esc" "$count" "$screen" "$max_screen"
+            "$icon_prefix$current_esc" "$dots" "$current_esc" "$count" "$screen" "$max_screen"
         ;;
 
     *)
-        echo "Usage: hypr-spotlight {create|switch|go|move|close|next|prev|name|name-window|find|list|current|waybar|menu-json|menu-open} [args]"
+        echo "Usage: hypr-spotlight {create|switch|go|move|close|next|prev|name|name-window|icon|clear-icon|find|list|current|waybar|menu-json|menu-open} [args]"
         exit 1
         ;;
 esac

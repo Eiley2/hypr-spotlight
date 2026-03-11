@@ -105,7 +105,11 @@ ok "Elephant menu installed"
 
 # --- 3. Create state directory ---
 mkdir -p ~/.cache/hypr-spotlight
-touch ~/.cache/hypr-spotlight/projects
+touch \
+    ~/.cache/hypr-spotlight/projects \
+    ~/.cache/hypr-spotlight/window-names \
+    ~/.cache/hypr-spotlight/project-icons \
+    ~/.cache/hypr-spotlight/usage.tsv
 
 # --- 4. Patch Hyprland bindings ---
 BINDINGS_FILE="$HOME/.config/hypr/bindings.conf"
