@@ -36,6 +36,44 @@ signal_waybar() {
     pkill -RTMIN+11 waybar 2>/dev/null
 }
 
+# Switch all monitors to a project's screens (monitor 1→screen 1, monitor 2→screen 2, etc.)
+activate_project() {
+    local name="$1"
+    local start
+    start=$(get_start "$name")
+    [ -z "$start" ] && return 1
+
+    echo "$name" > "$CURRENT_FILE"
+
+    # Get monitor names sorted by ID
+    local monitors
+    mapfile -t monitors < <(hyprctl -j monitors 2>/dev/null | jq -r 'sort_by(.id) | .[].name')
+    local mon_count=${#monitors[@]}
+
+    if [ "$mon_count" -le 1 ]; then
+        # Single monitor: just switch workspace
+        hyprctl dispatch workspace "$start" > /dev/null
+    else
+        # Multi-monitor: batch assign screen per monitor
+        local batch=""
+        local focused
+        focused=$(hyprctl -j monitors 2>/dev/null | jq -r '.[] | select(.focused) | .name')
+
+        for i in "${!monitors[@]}"; do
+            local ws=$((start + i))
+            local mon="${monitors[$i]}"
+            [ "$i" -ge "$SCREENS" ] && break
+            batch+="dispatch focusmonitor ${mon}; dispatch workspace ${ws}; "
+        done
+
+        # Return focus to the originally focused monitor
+        batch+="dispatch focusmonitor ${focused}"
+        hyprctl --batch "$batch" > /dev/null
+    fi
+
+    signal_waybar
+}
+
 # Auto-detect current project from active workspace
 sync_from_workspace() {
     local active_ws
@@ -74,17 +112,13 @@ case "$1" in
         # If exists, just switch to it
         existing_start=$(get_start "$name")
         if [ -n "$existing_start" ]; then
-            echo "$name" > "$CURRENT_FILE"
-            hyprctl dispatch workspace "$existing_start" > /dev/null
-            signal_waybar
+            activate_project "$name"
             exit 0
         fi
 
         start=$(next_start)
         printf '%s\t%s\n' "$name" "$start" >> "$PROJECTS_FILE"
-        echo "$name" > "$CURRENT_FILE"
-        hyprctl dispatch workspace "$start" > /dev/null
-        signal_waybar
+        activate_project "$name"
         ;;
 
     switch)
@@ -99,9 +133,7 @@ case "$1" in
         start=$(get_start "$name")
         [ -z "$start" ] && exit 1
 
-        echo "$name" > "$CURRENT_FILE"
-        hyprctl dispatch workspace "$start" > /dev/null
-        signal_waybar
+        activate_project "$name"
         ;;
 
     go)
@@ -139,8 +171,7 @@ case "$1" in
         if [ "$(get_current)" = "$name" ]; then
             first=$(head -1 "$PROJECTS_FILE" | cut -f1)
             if [ -n "$first" ]; then
-                echo "$first" > "$CURRENT_FILE"
-                hyprctl dispatch workspace "$(get_start "$first")" > /dev/null
+                activate_project "$first"
             else
                 > "$CURRENT_FILE"
             fi
@@ -158,9 +189,7 @@ case "$1" in
             if [ "${names[$i]}" = "$current" ]; then
                 next_i=$(( (i + 1) % count ))
                 name="${names[$next_i]}"
-                echo "$name" > "$CURRENT_FILE"
-                hyprctl dispatch workspace "$(get_start "$name")" > /dev/null
-                signal_waybar
+                activate_project "$name"
                 exit 0
             fi
         done
@@ -176,9 +205,7 @@ case "$1" in
             if [ "${names[$i]}" = "$current" ]; then
                 prev_i=$(( (i - 1 + count) % count ))
                 name="${names[$prev_i]}"
-                echo "$name" > "$CURRENT_FILE"
-                hyprctl dispatch workspace "$(get_start "$name")" > /dev/null
-                signal_waybar
+                activate_project "$name"
                 exit 0
             fi
         done
@@ -190,9 +217,7 @@ case "$1" in
         mapfile -t names < <(cut -f1 "$PROJECTS_FILE")
         target="${names[$((index - 1))]}"
         [ -z "$target" ] && exit 0
-        echo "$target" > "$CURRENT_FILE"
-        hyprctl dispatch workspace "$(get_start "$target")" > /dev/null
-        signal_waybar
+        activate_project "$target"
         ;;
 
     list)
