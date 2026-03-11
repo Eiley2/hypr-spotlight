@@ -7,6 +7,7 @@ It lets you:
 - group workspaces into named projects
 - jump between screens inside the current project with number keys
 - switch projects quickly
+- assign custom labels to important windows
 - see the active project in Waybar
 - open a native Walker/Elephant spotlight for windows, apps, projects, and actions
 
@@ -26,7 +27,7 @@ Inside a project:
 
 - `SUPER + 1/2/3` goes to screens inside that project
 - `SUPER + SHIFT + 1/2/3` moves the focused window inside that project
-- `SUPER + ALT + F` opens the spotlight
+- `SUPER + SPACE` opens the spotlight
 
 The spotlight is native Walker/Elephant, so it shows real app icons and opens windows, apps, projects, and actions from one place.
 
@@ -76,21 +77,13 @@ The uninstaller will:
 | --- | --- |
 | `SUPER + 1/2/3` | Go to screen 1/2/3 in the current project |
 | `SUPER + SHIFT + 1/2/3` | Move the focused window to screen 1/2/3 |
+| `SUPER + SHIFT + R` | Rename current window |
+| `SUPER + SPACE` | Open spotlight |
 | `SUPER + ALT + 1-9` | Switch to project by index |
 | `SUPER + ALT + N` | Create project |
 | `SUPER + ALT + P` | Switch project |
 | `SUPER + ALT + W` | Close project |
-| `SUPER + ALT + R` | Name current window |
-| `SUPER + ALT + F` | Open spotlight |
-
-## Important Notes
-
-- This is a hard cutover to `hypr-spotlight`.
-- There are no `hypr-project` compatibility aliases.
-- Runtime state lives in `~/.cache/hypr-spotlight/`.
-- The spotlight window entries are formatted to make duplicates identifiable:
-  project first, window title second, app name and screen in subtext.
-- The Waybar module uses `custom/project`.
+| `SUPER + ALT + R` | Rename current project |
 
 ## License
 

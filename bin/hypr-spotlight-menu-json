@@ -94,17 +94,6 @@ def load_clients():
     ]
 
 
-def running_class_keys(clients):
-    keys = set()
-    for client in clients:
-        raw = client["class"]
-        for candidate in (raw, raw.split(".")[-1], raw.split("/")[-1]):
-            norm = normalize(candidate)
-            if norm:
-                keys.add(norm)
-    return keys
-
-
 def locate_project(workspace_id: int, projects):
     for name, start in projects:
         end = start + BLOCK - 1
@@ -126,8 +115,6 @@ def build_entries():
     custom_names = load_custom_names()
     apps, desktop_by_key, desktop_icon, desktop_name = load_apps()
     clients = load_clients()
-    running_keys = running_class_keys(clients)
-    open_desktops = set()
 
     project_counts = {name: 0 for name, _ in projects}
     for client in clients:
@@ -140,45 +127,24 @@ def build_entries():
     for client in clients:
         project_name, screen_num = locate_project(client["ws_id"], projects)
         desktop = resolve_desktop_for_class(client["class"], desktop_by_key)
-        if desktop:
-            open_desktops.add(desktop)
         app_display_name = desktop_name.get(desktop) or client["class"]
-        display_name = custom_names.get(client["address"]) or app_display_name
-        title_display = client["title"] or display_name
+        title_display = client["title"] or app_display_name
+        custom_name = custom_names.get(client["address"], "").strip()
+        if custom_name:
+            text = f"{project_name} · {custom_name}"
+            if title_display and title_display != custom_name:
+                text = f"{text} · {title_display}"
+        else:
+            text = f"{project_name} · {title_display}"
         payload = encode_payload([client["address"], str(client["ws_id"]), project_name])
         entries.append(
             {
-                "Text": f"{project_name} · {title_display}",
-                "Subtext": f"{display_name} · screen {screen_num}",
+                "Text": text,
+                "Subtext": f"{app_display_name} · screen {screen_num}",
                 "Value": f"window:{payload}",
                 "Icon": desktop_icon.get(desktop, "application-x-executable"),
             }
         )
-
-    for app in apps:
-        payload = base64.b64encode(app["desktop"].encode()).decode()
-        is_open = app["desktop"] in open_desktops or any(
-            key and key in running_keys for key in (normalize(candidate) for candidate in desktop_keys(app["desktop"], app["name"], app["startup"]))
-        )
-        entries.append(
-            {
-                "Text": app["name"],
-                "Subtext": "Open now · launch another instance" if is_open else "Application",
-                "Value": f"app:{payload}",
-                "Icon": app["icon"],
-                "_rank": 1 if is_open else 2,
-            }
-        )
-
-    window_count = len(clients)
-    for index, entry in enumerate(entries[:window_count]):
-        entry["_rank"] = 0
-
-    app_entries = entries[window_count:]
-    app_entries.sort(key=lambda entry: (entry["_rank"], entry["Text"].lower()))
-    entries = entries[:window_count] + app_entries
-    for entry in entries:
-        entry.pop("_rank", None)
 
     for name, _start in projects:
         payload = base64.b64encode(name.encode()).decode()
@@ -194,12 +160,28 @@ def build_entries():
     entries.extend(
         [
             {"Text": "New project", "Subtext": "Create and switch", "Value": "action:create", "Icon": "folder-new"},
-            {"Text": "Name current window", "Subtext": "Set custom label", "Value": "action:name", "Icon": "edit-rename"},
+            {"Text": "Rename current project", "Subtext": "Rename this workspace group", "Value": "action:name", "Icon": "edit-rename"},
+            {"Text": "Rename current window", "Subtext": "Set a custom label for the focused window", "Value": "action:name-window", "Icon": "edit-rename"},
             {"Text": "Focus mode", "Subtext": "Laptop only", "Value": "action:focus-mode", "Icon": "preferences-desktop-display"},
             {"Text": "All screens on", "Subtext": "Enable all monitors", "Value": "action:all-screens", "Icon": "video-display"},
             {"Text": "Screen toggle menu", "Subtext": "Monitor controls", "Value": "action:screen-menu", "Icon": "video-joined-displays"},
         ]
     )
+
+    app_entries = []
+    for app in apps:
+        payload = base64.b64encode(app["desktop"].encode()).decode()
+        app_entries.append(
+            {
+                "Text": app["name"],
+                "Subtext": "Application",
+                "Value": f"app:{payload}",
+                "Icon": app["icon"],
+            }
+        )
+
+    app_entries.sort(key=lambda entry: entry["Text"].lower())
+    entries.extend(app_entries)
 
     return entries
 
