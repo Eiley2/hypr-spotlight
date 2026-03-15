@@ -6,15 +6,55 @@ STATE_DIR="$HOME/.cache/hypr-spotlight"
 PROJECTS_FILE="$STATE_DIR/projects"
 CURRENT_FILE="$STATE_DIR/current"
 NAMES_FILE="$STATE_DIR/window-names"
+SCREEN_NAMES_FILE="$STATE_DIR/screen-names"
 ICONS_FILE="$STATE_DIR/project-icons"
 USAGE_FILE="$STATE_DIR/usage.tsv"
 APPS_CACHE="$STATE_DIR/apps-cache.tsv"
+DEBUG_LOG="$STATE_DIR/debug.log"
+PROJECT_MENU_FILE="$STATE_DIR/project-menu.xml"
 
 mkdir -p "$STATE_DIR"
-touch "$PROJECTS_FILE" "$NAMES_FILE" "$ICONS_FILE" "$USAGE_FILE"
+touch "$PROJECTS_FILE" "$NAMES_FILE" "$SCREEN_NAMES_FILE" "$ICONS_FILE" "$USAGE_FILE"
 
 get_current() {
     cat "$CURRENT_FILE" 2>/dev/null
+}
+
+debug_log() {
+    [ "${HYPR_SPOTLIGHT_DEBUG:-0}" = "1" ] || return 0
+    printf '%s\tpid=%s\tcmd=%s\t%s\n' "$(date +%H:%M:%S.%3N)" "$$" "${1:-unknown}" "${2:-}" >> "$DEBUG_LOG"
+}
+
+set_current() {
+    local value="$1"
+    local tmp
+
+    tmp=$(mktemp)
+    printf '%s\n' "$value" > "$tmp"
+    mv "$tmp" "$CURRENT_FILE"
+    debug_log "set_current" "value=$value active_ws=$(active_workspace_id || printf '?')"
+}
+
+clear_current() {
+    local tmp
+
+    tmp=$(mktemp)
+    : > "$tmp"
+    mv "$tmp" "$CURRENT_FILE"
+    debug_log "clear_current" "active_ws=$(active_workspace_id || printf '?')"
+}
+
+active_workspace_id() {
+    local active_ws
+
+    active_ws=$(hyprctl -j activeworkspace 2>/dev/null | jq -r '.id // empty' 2>/dev/null)
+    case "$active_ws" in
+        ''|null|*[!0-9-]*)
+            return 1
+            ;;
+    esac
+    [ "$active_ws" -lt 1 ] && return 1
+    printf '%s\n' "$active_ws"
 }
 
 get_start() {
@@ -86,6 +126,225 @@ project_icon() {
     get_tsv_value "$ICONS_FILE" "$1"
 }
 
+get_screen_name() {
+    local project="$1"
+    local screen="$2"
+    [ -f "$SCREEN_NAMES_FILE" ] || return 1
+    awk -F'\t' -v project="$project" -v screen="$screen" '$1 == project && $2 == screen { print $3; exit }' "$SCREEN_NAMES_FILE"
+}
+
+set_screen_name() {
+    local project="$1"
+    local screen="$2"
+    local name="$3"
+    local tmp
+
+    tmp=$(mktemp)
+    [ -f "$SCREEN_NAMES_FILE" ] && awk -F'\t' -v project="$project" -v screen="$screen" '!( $1 == project && $2 == screen ) { print }' "$SCREEN_NAMES_FILE" > "$tmp"
+    printf '%s\t%s\t%s\n' "$project" "$screen" "$name" >> "$tmp"
+    mv "$tmp" "$SCREEN_NAMES_FILE"
+}
+
+delete_screen_name() {
+    local project="$1"
+    local screen="$2"
+    local tmp
+
+    tmp=$(mktemp)
+    [ -f "$SCREEN_NAMES_FILE" ] && awk -F'\t' -v project="$project" -v screen="$screen" '!( $1 == project && $2 == screen ) { print }' "$SCREEN_NAMES_FILE" > "$tmp"
+    mv "$tmp" "$SCREEN_NAMES_FILE"
+}
+
+rename_project_screen_names() {
+    local old_name="$1"
+    local new_name="$2"
+    local tmp
+
+    tmp=$(mktemp)
+    if [ -f "$SCREEN_NAMES_FILE" ]; then
+        awk -F'\t' -v old_name="$old_name" -v new_name="$new_name" '
+            $1 == old_name { $1 = new_name }
+            { print }
+        ' OFS='\t' "$SCREEN_NAMES_FILE" > "$tmp"
+        mv "$tmp" "$SCREEN_NAMES_FILE"
+    fi
+}
+
+current_screen_context() {
+    local active_ws
+    local current_name
+    local start
+    local screen
+
+    active_ws=$(active_workspace_id) || return 1
+
+    current_name=$(project_for_workspace "$active_ws")
+    [ -z "$current_name" ] && return 1
+
+    start=$(get_start "$current_name")
+    [ -z "$start" ] && return 1
+
+    screen=$((active_ws - start + 1))
+    printf '%s\t%s\t%s\n' "$current_name" "$start" "$screen"
+}
+
+ensure_waybar_project_context() {
+    local active_ws
+    local active_project
+
+    active_ws=$(active_workspace_id || true)
+    active_project=""
+    if [ -n "$active_ws" ]; then
+        active_project=$(project_for_workspace "$active_ws" || true)
+    fi
+
+    if [ -n "$active_project" ]; then
+        current="$active_project"
+        set_current "$current"
+    else
+        sync_from_workspace
+        current=$(get_current)
+    fi
+
+    if [ -z "$current" ]; then
+        if [ -n "$active_project" ]; then
+            current="$active_project"
+            debug_log "ensure_waybar_project_context" "recover_from_active_project -> $current active_ws=$active_ws"
+            set_current "$current"
+        elif [ -s "$PROJECTS_FILE" ]; then
+            current=$(head -1 "$PROJECTS_FILE" | cut -f1)
+            debug_log "ensure_waybar_project_context" "fallback_empty_current -> $current active_ws=$(active_workspace_id || printf '?')"
+            set_current "$current"
+        else
+            return 1
+        fi
+    fi
+
+    start=$(get_start "$current")
+    if [ -z "$start" ]; then
+        if [ -n "$active_project" ]; then
+            current="$active_project"
+            start=$(get_start "$current")
+            debug_log "ensure_waybar_project_context" "recover_missing_start_from_active_project -> $current active_ws=$active_ws"
+            [ -n "$start" ] && set_current "$current"
+        elif [ -s "$PROJECTS_FILE" ]; then
+            current=$(head -1 "$PROJECTS_FILE" | cut -f1)
+            debug_log "ensure_waybar_project_context" "fallback_missing_start -> $current active_ws=$(active_workspace_id || printf '?')"
+            set_current "$current"
+            start=$(get_start "$current")
+        else
+            return 1
+        fi
+    fi
+
+    active_ws=$(active_workspace_id || true)
+
+    if [ -n "$start" ] && [ -n "$active_ws" ]; then
+        screen=$((active_ws - start + 1))
+    else
+        screen=0
+    fi
+
+    occupied=$(hyprctl -j workspaces 2>/dev/null | jq -r \
+        "[.[] | select(.id >= $start and .id < ($start + $BLOCK)) | .id - $start + 1] | .[]" 2>/dev/null)
+
+    max_screen=$MIN_SCREENS
+    for s in $(project_named_screens "$current"); do
+        [ "$s" -gt "$max_screen" ] && max_screen="$s"
+    done
+    [ "$screen" -gt "$max_screen" ] && max_screen="$screen"
+
+    return 0
+}
+
+project_named_screens() {
+    local project="$1"
+    [ -f "$SCREEN_NAMES_FILE" ] || return 0
+    awk -F'\t' -v project="$project" '$1 == project { print $2 }' "$SCREEN_NAMES_FILE"
+}
+
+truncate_text() {
+    local text="$1"
+    local limit="$2"
+
+    if [ "${#text}" -le "$limit" ]; then
+        printf '%s' "$text"
+    else
+        printf '%s...' "${text:0:$((limit - 3))}"
+    fi
+}
+
+emit_waybar_json() {
+    local text="$1"
+    local tooltip="$2"
+    local class="$3"
+    jq -cn --arg text "$text" --arg tooltip "$tooltip" --arg class "$class" '{text: $text, tooltip: $tooltip, class: $class}'
+}
+
+xml_escape() {
+    printf '%s' "$1" | sed \
+        -e 's/&/\&amp;/g' \
+        -e 's/</\&lt;/g' \
+        -e 's/>/\&gt;/g' \
+        -e 's/"/\&quot;/g' \
+        -e "s/'/\&apos;/g"
+}
+
+write_project_menu() {
+    local tmp
+    local current
+    local index
+    local name
+    local label
+    local label_escaped
+
+    tmp=$(mktemp)
+    current=$(get_current)
+    index=1
+
+    {
+        printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
+        printf '%s\n' '<interface>'
+        printf '%s\n' '  <object class="GtkMenu" id="menu">'
+
+        while IFS=$'\t' read -r name start; do
+            [ -z "$name" ] && continue
+            [ "$index" -gt 20 ] && break
+
+            if [ "$name" = "$current" ]; then
+                label="[$index] $name"
+            else
+                label="$index. $name"
+            fi
+            label_escaped=$(xml_escape "$label")
+
+            printf '%s\n' '    <child>'
+            printf '%s\n' "      <object class=\"GtkMenuItem\" id=\"project_${index}\">"
+            printf '%s\n' "        <property name=\"label\">${label_escaped}</property>"
+            printf '%s\n' '      </object>'
+            printf '%s\n' '    </child>'
+
+            index=$((index + 1))
+        done < "$PROJECTS_FILE"
+
+        if [ "$index" -gt 1 ]; then
+            printf '%s\n' '    <child>'
+            printf '%s\n' '      <object class="GtkSeparatorMenuItem" id="projects_separator" />'
+            printf '%s\n' '    </child>'
+        fi
+
+        printf '%s\n' '    <child>'
+        printf '%s\n' '      <object class="GtkMenuItem" id="new_project">'
+        printf '%s\n' '        <property name="label">New Project...</property>'
+        printf '%s\n' '      </object>'
+        printf '%s\n' '    </child>'
+        printf '%s\n' '  </object>'
+        printf '%s\n' '</interface>'
+    } > "$tmp"
+
+    mv "$tmp" "$PROJECT_MENU_FILE"
+}
+
 focus_window_target() {
     local addr="$1"
     local ws="$2"
@@ -101,11 +360,58 @@ window_workspace() {
     hyprctl -j clients 2>/dev/null | jq -r --arg addr "$addr" '.[] | select(.address == $addr) | .workspace.id' 2>/dev/null | head -n1
 }
 
+active_window_address() {
+    hyprctl -j activewindow 2>/dev/null | jq -r '.address // empty' 2>/dev/null
+}
+
+monitor_for_workspace() {
+    local ws="$1"
+    hyprctl -j monitors 2>/dev/null | jq -r --argjson ws "$ws" '.[] | select(.activeWorkspace.id == $ws) | .name' 2>/dev/null | head -n1
+}
+
+focus_workspace_target() {
+    local ws="$1"
+    local addr="$2"
+    local mon
+
+    mon=$(monitor_for_workspace "$ws")
+
+    if [ -n "$mon" ] && [ "$mon" != "null" ]; then
+        hyprctl dispatch focusmonitor "$mon" > /dev/null 2>&1
+    else
+        hyprctl dispatch workspace "$ws" > /dev/null 2>&1
+    fi
+
+    [ -n "$addr" ] && hyprctl dispatch focuswindow "address:${addr}" > /dev/null 2>&1
+}
+
 current_project_name() {
     local active_ws
-    active_ws=$(hyprctl -j activeworkspace 2>/dev/null | jq '.id' 2>/dev/null)
-    [ -z "$active_ws" ] || [ "$active_ws" = "null" ] && return 1
+    active_ws=$(active_workspace_id) || return 1
     project_for_workspace "$active_ws"
+}
+
+project_name_by_offset() {
+    local current="$1"
+    local offset="$2"
+    local names
+    local count
+    local i
+    local target_i
+
+    mapfile -t names < <(cut -f1 "$PROJECTS_FILE")
+    count=${#names[@]}
+    [ "$count" -gt 0 ] || return 1
+
+    for i in "${!names[@]}"; do
+        if [ "${names[$i]}" = "$current" ]; then
+            target_i=$(( (i + offset + count) % count ))
+            printf '%s\n' "${names[$target_i]}"
+            return 0
+        fi
+    done
+
+    return 1
 }
 
 project_for_workspace() {
@@ -133,6 +439,7 @@ next_start() {
 }
 
 signal_waybar() {
+    write_project_menu
     pkill -RTMIN+11 waybar 2>/dev/null
 }
 
@@ -287,6 +594,7 @@ menu_open_value() {
             action="$payload"
             case "$action" in
                 create)       "$0" create ;;
+                close-project) "$0" close ;;
                 name)         "$0" name ;;
                 name-window)  "$0" name-window ;;
                 icon)         "$0" icon ;;
@@ -304,29 +612,24 @@ menu_open_value() {
 activate_project() {
     local name="$1"
     local start
-    local source_name
-    local source_start
     start=$(get_start "$name")
     [ -z "$start" ] && return 1
 
-    # Preserve the current screen-to-monitor mapping when switching projects.
+    # Preserve each monitor's current screen number, regardless of which
+    # project block it currently belongs to.
     local screen_map=()
-    source_name=$(get_current)
-    source_start=$(get_start "$source_name")
-    if [ -n "$source_start" ]; then
-        mapfile -t screen_map < <(
-            hyprctl -j monitors 2>/dev/null | jq -r --argjson start "$source_start" --argjson block "$BLOCK" '
-                sort_by(.id)
-                | .[]
-                | . as $monitor
-                | ($monitor.activeWorkspace.id // 0) as $ws
-                | if $ws >= $start and $ws < ($start + $block)
-                  then "\($monitor.name)\t\($ws - $start + 1)"
-                  else empty
-                  end
-            '
-        )
-    fi
+    mapfile -t screen_map < <(
+        hyprctl -j monitors 2>/dev/null | jq -r --argjson block "$BLOCK" '
+            sort_by(.id)
+            | .[]
+            | . as $monitor
+            | ($monitor.activeWorkspace.id // 0) as $ws
+            | if $ws >= 1
+              then "\($monitor.name)\t\((($ws - 1) % $block) + 1)"
+              else empty
+              end
+        '
+    )
     if [ "${#screen_map[@]}" -eq 0 ]; then
         local fallback_monitors
         mapfile -t fallback_monitors < <(hyprctl -j monitors 2>/dev/null | jq -r 'sort_by(.id) | .[].name')
@@ -343,8 +646,8 @@ activate_project() {
         # Single monitor: just switch workspace
         hyprctl dispatch workspace "$start" > /dev/null
     else
-        # Multi-monitor: batch assign screen per monitor
-        local batch=""
+        # Multi-monitor: switch each monitor explicitly. `hyprctl --batch`
+        # can leave non-focused monitors unchanged for workspace dispatches.
         local focused
         focused=$(hyprctl -j monitors 2>/dev/null | jq -r '.[] | select(.focused) | .name')
 
@@ -354,28 +657,27 @@ activate_project() {
             local screen="${entry#*$'\t'}"
             [ "$screen" -gt "$BLOCK" ] && continue
             local ws=$((start + screen - 1))
-            batch+="dispatch focusmonitor ${mon}; dispatch workspace ${ws}; "
+            hyprctl dispatch focusmonitor "$mon" > /dev/null 2>&1
+            hyprctl dispatch workspace "$ws" > /dev/null 2>&1
         done
 
-        # Return focus to the originally focused monitor
-        batch+="dispatch focusmonitor ${focused}"
-        hyprctl --batch "$batch" > /dev/null
+        # Return focus to the originally focused monitor.
+        [ -n "$focused" ] && hyprctl dispatch focusmonitor "$focused" > /dev/null 2>&1
     fi
 
-    echo "$name" > "$CURRENT_FILE"
+    set_current "$name"
     signal_waybar
 }
 
 # Auto-detect current project from active workspace
 sync_from_workspace() {
     local active_ws
-    active_ws=$(hyprctl -j activeworkspace 2>/dev/null | jq '.id' 2>/dev/null)
-    [ -z "$active_ws" ] && return
+    active_ws=$(active_workspace_id) || return
 
     while IFS=$'\t' read -r name start; do
         local end=$((start + BLOCK - 1))
         if [ "$active_ws" -ge "$start" ] && [ "$active_ws" -le "$end" ]; then
-            echo "$name" > "$CURRENT_FILE"
+            set_current "$name"
             return
         fi
     done < "$PROJECTS_FILE"
@@ -388,9 +690,9 @@ ensure_project() {
     if [ -z "$current" ] || [ -z "$(get_start "$current")" ]; then
         if [ ! -s "$PROJECTS_FILE" ]; then
             printf '%s\t%s\n' "main" "1" >> "$PROJECTS_FILE"
-            echo "main" > "$CURRENT_FILE"
+            set_current "main"
         else
-            head -1 "$PROJECTS_FILE" | cut -f1 > "$CURRENT_FILE"
+            set_current "$(head -1 "$PROJECTS_FILE" | cut -f1)"
         fi
     fi
 }
@@ -435,7 +737,7 @@ case "$1" in
         start=$(get_start "$current")
         [ -z "$start" ] && exit 1
         ws=$((start + screen - 1))
-        hyprctl dispatch workspace "$ws" > /dev/null
+        focus_workspace_target "$ws"
         signal_waybar
         ;;
 
@@ -446,7 +748,9 @@ case "$1" in
         start=$(get_start "$current")
         [ -z "$start" ] && exit 1
         ws=$((start + screen - 1))
+        addr=$(active_window_address)
         hyprctl dispatch movetoworkspacesilent "$ws" > /dev/null
+        focus_workspace_target "$ws" "$addr"
         signal_waybar
         ;;
 
@@ -466,14 +770,15 @@ case "$1" in
             if [ -n "$first" ]; then
                 activate_project "$first"
             else
-                > "$CURRENT_FILE"
+                clear_current
             fi
         fi
         signal_waybar
         ;;
 
     next)
-        current=$(get_current)
+        active_ws=$(active_workspace_id || true)
+        current=$( [ -n "$active_ws" ] && project_for_workspace "$active_ws" || get_current )
         mapfile -t names < <(cut -f1 "$PROJECTS_FILE")
         count=${#names[@]}
         [ "$count" -le 1 ] && exit 0
@@ -489,7 +794,8 @@ case "$1" in
         ;;
 
     prev)
-        current=$(get_current)
+        active_ws=$(active_workspace_id || true)
+        current=$( [ -n "$active_ws" ] && project_for_workspace "$active_ws" || get_current )
         mapfile -t names < <(cut -f1 "$PROJECTS_FILE")
         count=${#names[@]}
         [ "$count" -le 1 ] && exit 0
@@ -502,6 +808,56 @@ case "$1" in
                 exit 0
             fi
         done
+        ;;
+
+    project-screen-next)
+        IFS=$'\t' read -r current_name start screen <<< "$(current_screen_context)"
+        [ -z "$current_name" ] || [ -z "$screen" ] && exit 1
+
+        target=$(project_name_by_offset "$current_name" 1) || exit 0
+        target_start=$(get_start "$target")
+        [ -z "$target_start" ] && exit 1
+
+        target_ws=$((target_start + screen - 1))
+        hyprctl dispatch workspace "$target_ws" > /dev/null 2>&1
+        set_current "$target"
+        signal_waybar
+        ;;
+
+    project-screen-prev)
+        IFS=$'\t' read -r current_name start screen <<< "$(current_screen_context)"
+        [ -z "$current_name" ] || [ -z "$screen" ] && exit 1
+
+        target=$(project_name_by_offset "$current_name" -1) || exit 0
+        target_start=$(get_start "$target")
+        [ -z "$target_start" ] && exit 1
+
+        target_ws=$((target_start + screen - 1))
+        hyprctl dispatch workspace "$target_ws" > /dev/null 2>&1
+        set_current "$target"
+        signal_waybar
+        ;;
+
+    screen-next)
+        IFS=$'\t' read -r current_name start screen <<< "$(current_screen_context)"
+        [ -z "$current_name" ] || [ -z "$start" ] || [ -z "$screen" ] && exit 1
+
+        target_screen=$(( (screen % BLOCK) + 1 ))
+        target_ws=$((start + target_screen - 1))
+        hyprctl dispatch workspace "$target_ws" > /dev/null 2>&1
+        set_current "$current_name"
+        signal_waybar
+        ;;
+
+    screen-prev)
+        IFS=$'\t' read -r current_name start screen <<< "$(current_screen_context)"
+        [ -z "$current_name" ] || [ -z "$start" ] || [ -z "$screen" ] && exit 1
+
+        target_screen=$(( (screen - 2 + BLOCK) % BLOCK + 1 ))
+        target_ws=$((start + target_screen - 1))
+        hyprctl dispatch workspace "$target_ws" > /dev/null 2>&1
+        set_current "$current_name"
+        signal_waybar
         ;;
 
     switch-index)
@@ -522,8 +878,7 @@ case "$1" in
         ;;
 
     name)
-        active_ws=$(hyprctl -j activeworkspace 2>/dev/null | jq '.id' 2>/dev/null)
-        [ -z "$active_ws" ] || [ "$active_ws" = "null" ] && exit 1
+        active_ws=$(active_workspace_id) || exit 1
 
         current_name=$(project_for_workspace "$active_ws")
         [ -z "$current_name" ] && exit 1
@@ -548,7 +903,7 @@ case "$1" in
         mv "$tmp" "$PROJECTS_FILE"
 
         if [ "$(get_current)" = "$current_name" ]; then
-            printf '%s\n' "$new_name" > "$CURRENT_FILE"
+            set_current "$new_name"
         fi
 
         current_icon=$(project_icon "$current_name")
@@ -557,6 +912,55 @@ case "$1" in
             set_tsv_value "$ICONS_FILE" "$new_name" "$current_icon"
         fi
 
+        rename_project_screen_names "$current_name" "$new_name"
+
+        signal_waybar
+        ;;
+
+    name-screen)
+        IFS=$'\t' read -r current_name start screen <<< "$(current_screen_context)"
+        [ -z "$current_name" ] || [ -z "$screen" ] && exit 1
+        if [ -n "$2" ]; then
+            case "$2" in
+                ''|*[!0-9]*)
+                    new_name="$2"
+                    ;;
+                *)
+                    screen="$2"
+                    new_name="$3"
+                    ;;
+            esac
+        fi
+        case "$screen" in
+            ''|*[!0-9]*)
+                exit 1
+                ;;
+        esac
+        [ "$screen" -lt 1 ] || [ "$screen" -gt "$BLOCK" ] && exit 1
+
+        current_screen_name=$(get_screen_name "$current_name" "$screen")
+        new_name="${new_name:-$(walker -d -I -p "  Rename screen ${screen}:" 2>/dev/null)}"
+        new_name=$(echo "$new_name" | xargs)
+        [ -z "$new_name" ] && exit 0
+        [ "$new_name" = "$current_screen_name" ] && exit 0
+
+        set_screen_name "$current_name" "$screen" "$new_name"
+        signal_waybar
+        ;;
+
+    clear-screen-name)
+        IFS=$'\t' read -r current_name start screen <<< "$(current_screen_context)"
+        [ -z "$current_name" ] || [ -z "$screen" ] && exit 1
+        if [ -n "$2" ]; then
+            screen="$2"
+        fi
+        case "$screen" in
+            ''|*[!0-9]*)
+                exit 1
+                ;;
+        esac
+        [ "$screen" -lt 1 ] || [ "$screen" -gt "$BLOCK" ] && exit 1
+        delete_screen_name "$current_name" "$screen"
         signal_waybar
         ;;
 
@@ -619,59 +1023,122 @@ case "$1" in
         menu_open_value "$2"
         ;;
 
-    waybar)
-        sync_from_workspace
-        current=$(get_current)
+    waybar-screen)
+        target_screen="$2"
+        case "$target_screen" in
+            ''|*[!0-9]*)
+                exit 1
+                ;;
+        esac
+        [ "$target_screen" -lt 1 ] || [ "$target_screen" -gt "$BLOCK" ] && exit 1
 
-        if [ -z "$current" ]; then
-            printf '{"text": "  new", "tooltip": "Click to create a project", "class": "empty"}\n'
+        if ! ensure_waybar_project_context; then
+            emit_waybar_json "" "" "empty"
             exit 0
         fi
 
-        start=$(get_start "$current")
-        active_ws=$(hyprctl -j activeworkspace 2>/dev/null | jq '.id' 2>/dev/null)
-
-        if [ -n "$start" ] && [ -n "$active_ws" ]; then
-            screen=$((active_ws - start + 1))
-        else
-            screen=0
+        if [ "$target_screen" -gt "$max_screen" ]; then
+            emit_waybar_json "" "" "empty"
+            exit 0
         fi
 
-        # Dynamic dots: show at least MIN_SCREENS, expand if more are occupied
-        occupied=$(hyprctl -j workspaces 2>/dev/null | jq -r \
-            "[.[] | select(.id >= $start and .id < ($start + $BLOCK)) | .id - $start + 1] | .[]" 2>/dev/null)
+        screen_name=$(get_screen_name "$current" "$target_screen")
+        monitor_name=$(monitor_for_workspace $((start + target_screen - 1)))
 
-        max_screen=$MIN_SCREENS
-        for s in $occupied; do
-            [ "$s" -gt "$max_screen" ] && max_screen="$s"
-        done
-        [ "$screen" -gt "$max_screen" ] && max_screen="$screen"
+        if [ -n "$screen_name" ]; then
+            compact_label=$(truncate_text "$screen_name" 10)
+            full_label="$screen_name"
+        else
+            compact_label="Screen ${target_screen}"
+            full_label="Screen ${target_screen}"
+        fi
 
-        dots=""
-        for i in $(seq 1 $max_screen); do
-            if [ "$i" -eq "$screen" ]; then
-                dots+=" 󰮯"
-            elif echo "$occupied" | grep -qx "$i"; then
-                dots+=" 󰊠"
-            else
-                dots+=" 󰧟"
-            fi
-        done
+        if [ "$target_screen" -eq "$screen" ]; then
+            state="active"
+        elif echo "$occupied" | grep -qx "$target_screen"; then
+            state="occupied"
+        else
+            state="idle"
+        fi
 
+        text="${target_screen}"
+        if [ -n "$screen_name" ]; then
+            text+=" ${compact_label}"
+        fi
+
+        tooltip_rows=()
+        tooltip_rows+=("${current}")
+        tooltip_rows+=("[${target_screen}] ${full_label}")
+        if [ -n "$monitor_name" ] && [ "$monitor_name" != "null" ]; then
+            tooltip_rows+=("Visible on ${monitor_name}")
+        elif [ "$state" = "occupied" ]; then
+            tooltip_rows+=("Occupied")
+        else
+            tooltip_rows+=("Empty")
+        fi
+        tooltip_rows+=("")
+        tooltip_rows+=("Click: go to screen")
+        tooltip_rows+=("Middle: move window here")
+        tooltip_rows+=("Right-click: rename screen")
+        tooltip_lines=$(printf '%s\n' "${tooltip_rows[@]}")
+        tooltip_lines=${tooltip_lines%$'\n'}
+
+        emit_waybar_json "$text" "$tooltip_lines" "$state"
+        ;;
+
+    waybar)
+        if ! ensure_waybar_project_context; then
+            write_project_menu
+            emit_waybar_json "  new" "Click to create a project" "empty"
+            exit 0
+        fi
+
+        write_project_menu
         count=$(wc -l < "$PROJECTS_FILE" | xargs)
-        current_esc=$(echo "$current" | sed 's/"/\\"/g')
         current_icon=$(project_icon "$current")
         icon_prefix=""
         if [ -n "$current_icon" ]; then
             icon_prefix="${current_icon} "
         fi
+        text_label="$icon_prefix$current"
 
-        printf '{"text": "%s%s", "tooltip": "%s  (%s projects)\\nScreen %d of %d\\n\\nClick: switch | Right-click: new | Middle: close\\nScroll: cycle projects", "class": "active"}\n' \
-            "$icon_prefix$current_esc" "$dots" "$current_esc" "$count" "$screen" "$max_screen"
+        tooltip_rows=()
+        tooltip_rows+=("${current}  (${count} projects)")
+        tooltip_rows+=("Screen ${screen} of ${max_screen}")
+        for i in $(seq 1 $max_screen); do
+            screen_name=$(get_screen_name "$current" "$i")
+            monitor_name=$(monitor_for_workspace $((start + i - 1)))
+
+            if [ -n "$screen_name" ]; then
+                label="$screen_name"
+            else
+                label="Screen ${i}"
+            fi
+
+            suffix=""
+            if [ -n "$monitor_name" ] && [ "$monitor_name" != "null" ]; then
+                suffix=" on ${monitor_name}"
+            elif echo "$occupied" | grep -qx "$i"; then
+                suffix=" occupied"
+            fi
+
+            if [ "$i" -eq "$screen" ]; then
+                tooltip_rows+=("> [${i}] ${label}${suffix}")
+            else
+                tooltip_rows+=("  [${i}] ${label}${suffix}")
+            fi
+        done
+        tooltip_rows+=("")
+        tooltip_rows+=("Click: open project list | Right-click: new project | Middle: name current screen")
+        tooltip_rows+=("Scroll: cycle projects")
+        tooltip_lines=$(printf '%s\n' "${tooltip_rows[@]}")
+        tooltip_lines=${tooltip_lines%$'\n'}
+
+        emit_waybar_json "$text_label" "$tooltip_lines" "active"
         ;;
 
     *)
-        echo "Usage: hypr-spotlight {create|switch|go|move|close|next|prev|name|name-window|icon|clear-icon|find|list|current|waybar|menu-json|menu-open} [args]"
+        echo "Usage: hypr-spotlight {create|switch|go|move|close|next|prev|name|name-screen|clear-screen-name|name-window|icon|clear-icon|find|list|current|waybar|menu-json|menu-open} [args]"
         exit 1
         ;;
 esac

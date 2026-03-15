@@ -262,6 +262,7 @@ def build_entries():
     general_actions = [
         [
             {"Text": "New project", "Subtext": "Create and switch", "Value": "action:create", "Icon": "folder-new"},
+            {"Text": "Close current project", "Subtext": "Close this workspace group", "Value": "action:close-project", "Icon": "window-close"},
             {"Text": "Rename current project", "Subtext": "Rename this workspace group", "Value": "action:name", "Icon": "edit-rename"},
             {"Text": "Rename current window", "Subtext": "Set a custom label for the focused window", "Value": "action:name-window", "Icon": "edit-rename"},
             {"Text": "Set current project icon", "Subtext": "Set a glyph or short marker for this project", "Value": "action:icon", "Icon": "tag"},
@@ -340,7 +341,7 @@ def build_entries():
                 target_text = project_label(target_name, project_icons)
                 current_window_actions.append(
                     {
-                        "Text": f"{target_text} · Move current window",
+                        "Text": f"Move current window to {target_text}",
                         "Subtext": f"{window_text} · keep screen {screen_num}",
                         "Value": f"window-action:{current_action_payload('move-project', target_name)}",
                         "Icon": "folder-move",
